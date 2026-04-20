@@ -2437,6 +2437,7 @@ dependencies = [
  "anyhow",
  "apollo-router",
  "async-trait",
+ "axum",
  "bytes",
  "futures",
  "http 1.4.0",
