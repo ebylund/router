@@ -105,7 +105,6 @@ where
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct RequestBodyLimit<Body, S> {
     _phantom: std::marker::PhantomData<Body>,
     inner: S,
