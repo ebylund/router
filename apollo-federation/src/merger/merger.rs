@@ -780,6 +780,13 @@ impl Merger {
             return false;
         }
 
+        // `_FieldSet` is the fed1 name for the federation `FieldSet` scalar. Some fed2
+        // subgraphs still carry a stale `scalar _FieldSet` that isn't registered through
+        // the @link import system, so `source_link_of_type` won't catch it.
+        if *type_.type_name() == name!("_FieldSet") {
+            return false;
+        }
+
         let type_feature = subgraph
             .schema()
             .metadata()

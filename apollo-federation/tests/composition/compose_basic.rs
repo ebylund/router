@@ -1,4 +1,6 @@
 use apollo_compiler::coord;
+use apollo_federation::composition::compose;
+use apollo_federation::subgraph::typestate::Subgraph;
 use insta::assert_snapshot;
 use test_log::test;
 
@@ -497,5 +499,81 @@ fn enum_value_mismatch_detected_with_multiple_input_fields() {
             "ENUM_VALUE_MISMATCH",
             r#"Enum type "Status" is used as both input type (for example, as type of "Beta.filterA(status:)") and output type (for example, as type of "Alpha.status"), but value "INACTIVE" is not defined in all the subgraphs defining "Status": "INACTIVE" is defined in subgraph "subgraphA" but not in subgraph "subgraphB""#,
         )],
+    );
+}
+
+#[test]
+fn does_not_merge_field_set_scalar_into_supergraph() {
+    // Some fed2 subgraphs carry a leftover `scalar _FieldSet` alongside the
+    // canonical `scalar federation__FieldSet`. This federation-internal type
+    // should not appear in the merged supergraph.
+    let s1 = Subgraph::parse(
+        "subgraphA",
+        "http://subgraphA",
+        r#"
+        schema
+          @link(url: "https://specs.apollo.dev/link/v1.0")
+          @link(url: "https://specs.apollo.dev/federation/v2.1", import: ["@key"])
+        {
+          query: Query
+        }
+
+        directive @link(url: String, as: String, for: link__Purpose, import: [link__Import]) repeatable on SCHEMA
+        directive @key(fields: federation__FieldSet!, resolvable: Boolean = true) repeatable on OBJECT | INTERFACE
+
+        scalar _FieldSet
+        scalar federation__FieldSet
+
+        enum link__Purpose { SECURITY EXECUTION }
+        scalar link__Import
+
+        type Query {
+          product: Product
+        }
+
+        type Product @key(fields: "id") {
+          id: ID!
+          name: String
+        }
+        "#,
+    )
+    .expect("parses");
+
+    let s2 = Subgraph::parse(
+        "subgraphB",
+        "http://subgraphB",
+        r#"
+        schema
+          @link(url: "https://specs.apollo.dev/link/v1.0")
+          @link(url: "https://specs.apollo.dev/federation/v2.1", import: ["@key"])
+        {
+          query: Query
+        }
+
+        directive @link(url: String, as: String, for: link__Purpose, import: [link__Import]) repeatable on SCHEMA
+        directive @key(fields: federation__FieldSet!, resolvable: Boolean = true) repeatable on OBJECT | INTERFACE
+
+        scalar federation__FieldSet
+
+        enum link__Purpose { SECURITY EXECUTION }
+        scalar link__Import
+
+        type Query {
+          _: Int
+        }
+
+        type Product @key(fields: "id") {
+          id: ID!
+          price: Int
+        }
+        "#,
+    )
+    .expect("parses");
+
+    let result = compose(vec![s1, s2], Default::default()).expect("composition succeeds");
+    let schema = result.schema().schema();
+    assert!(
+        schema.types.get("_FieldSet").is_none(),
+        "scalar _FieldSet should not appear in the supergraph"
     );
 }
