@@ -23,22 +23,30 @@ that pins a router commit and builds the binary from it.
   `apollo-federation/Cargo.toml`. Not a Rust module; the path is
   declared explicitly in `Cargo.toml`.
 - `mod.rs` — the in-crate library surface for the migration
-  subproject. Re-exports the embedded agent guide and (eventually)
-  analysis helpers.
+  subproject. Re-exports the embedded agent guide, `DiffKind` /
+  `FollowedBy`, and the `analyze` module.
+- `analyze.rs` — walks a project tree, finds `@connect(selection: …)`
+  directives, dual-parses each under V0_3 + V0_4, and emits
+  `recommendations.md` (or JSONL via `--format=json`) per the v1
+  format spec. Gated on the `connect-migrate` feature so
+  `apollo-parser` doesn't enter the default dep graph.
+- `diff.rs` — `DiffKind` / `FollowedBy` / `JSONSelection::diff_kinds`.
+  Originally introduced inside `json_selection/` for the corpus
+  survey; moved here so all migration-tool surface lives in one
+  directory.
 - `agent_guide.md` — developer-facing migration prose, embedded into
   the binary at compile time via `include_str!`. Printed by
-  `connect-migrate agent-guide`. **Interim content** — the current
-  text is a verbatim port of an early design draft that assumes a
-  single agent walking a chat loop. The next pass will rewrite it
-  around a two-skill handoff: one skill produces a human-editable
-  `recommendations.md`, the human edits decisions in place, and a
-  second skill applies the chosen actions.
+  `connect-migrate agent-guide`. Mirror of the canonical `SKILL.md`
+  at <https://github.com/apollographql/connect-migrate>; kept in sync
+  manually for now. <!-- FOLLOW-UP: pick between hash-check
+  duplication, build-time fetch, or dropping the embed — see the
+  FOLLOW-UP note at the bottom of SKILL.md. -->
 
 ## Building
 
 The binary is gated behind the `connect-migrate` feature so the
-`clap` dependency doesn't enter the default build graph for
-`apollo-federation` library consumers:
+`clap` and `apollo-parser` dependencies don't enter the default build
+graph for `apollo-federation` library consumers:
 
 ```sh
 cargo build --release --bin connect-migrate --features connect-migrate
