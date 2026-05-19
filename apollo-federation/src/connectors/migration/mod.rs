@@ -17,6 +17,8 @@
 //! the binary embeds via `include_str!` and prints under the
 //! `agent-guide` subcommand.
 
+#[cfg(feature = "connect-migrate")]
+pub mod analyze;
 pub mod diff;
 
 pub use diff::DiffKind;
