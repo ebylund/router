@@ -114,7 +114,14 @@ fn run_analyze(
     output: Option<PathBuf>,
     format: OutputFormat,
 ) -> io::Result<()> {
-    let project_root = std::env::current_dir()?;
+    // When exactly one path argument is a directory, treat it as the
+    // project root so emitted `file:` paths are relative to that dir
+    // rather than to the developer's cwd. Mode B's locator (line:col)
+    // is unaffected; this is purely cosmetic.
+    let project_root = match paths.as_slice() {
+        [only] if only.is_dir() => only.clone(),
+        _ => std::env::current_dir()?,
+    };
     let sites = analyze::analyze(&paths, &project_root);
 
     // Default to stdout; `-o <path>` (or `-o -` for explicit stdout)

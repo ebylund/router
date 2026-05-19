@@ -54,12 +54,18 @@ pub struct Site {
     pub recommendation: Recommendation,
     /// One-line justification of the recommendation.
     pub reasoning: String,
-    /// Approximate line in the source file. v0.0.2 first cut: the
-    /// `@connect` directive's start, not the exact token within the
-    /// selection — `apply` re-locates the token by text match.
+    /// Line in the source file (1-indexed) where the host `@connect`
+    /// directive starts. Authoritative locator for Mode B in
+    /// SKILL.md — the developer's migration assistant navigates here
+    /// to find the directive whose selection it should rewrite.
     pub line: Option<usize>,
-    /// Approximate column in the source file. Same caveat as `line`.
+    /// Column in the source file (1-indexed) where the host `@connect`
+    /// directive starts. Pair with `line` for navigation.
     pub col: Option<usize>,
+    /// Byte offset in the source file where the host `@connect`
+    /// directive starts. Same identification semantics as `line`/`col`
+    /// but stable under whitespace re-flow.
+    pub byte_offset: Option<usize>,
     /// Byte offset range of the divergent token inside `selection`.
     /// Used by the rewrite-block computation to do precise in-place
     /// replacements without text-search heuristics. Not emitted in
@@ -229,6 +235,7 @@ fn handle_connect(
 
     let directive_start = usize::from(d.syntax().text_range().start());
     let (line_no, col_no) = line_index.position(directive_start);
+    let byte_offset = directive_start;
 
     for kind in diffs {
         // Skip cosmetic kinds; analyze only reports actionable sites.
@@ -255,6 +262,7 @@ fn handle_connect(
             reasoning: reason,
             line: Some(line_no),
             col: Some(col_no),
+            byte_offset: Some(byte_offset),
             source_range,
             selection: normalized.clone(),
         });
@@ -584,7 +592,10 @@ pub fn write_markdown<W: Write>(
             if let Some(col) = site.col {
                 writeln!(out, "  col: {col}")?;
             }
-            writeln!(out, "  coordinate: {}", site.coordinate)?;
+            if let Some(byte_offset) = site.byte_offset {
+                writeln!(out, "  byte_offset: {byte_offset}")?;
+            }
+            writeln!(out, "  coordinate: {}  # informational", site.coordinate)?;
             writeln!(out, "  kind: {}", site.kind)?;
             if !site.text.is_empty() {
                 writeln!(out, "  text: {}", quote_for_comment(&site.text))?;
