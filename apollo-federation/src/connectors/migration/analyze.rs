@@ -550,7 +550,7 @@ pub fn write_markdown<W: Write>(
 
     writeln!(
         out,
-        "{} section(s) need a decision ({} divergent token(s) across {} `@connect` selection(s)). For each section, edit the **Proposed rewrite** block as needed and check the box that reflects your decision, then run:",
+        "{} section(s) need a decision ({} divergent token(s) across {} `@connect` selection(s)). For each section, edit the rewrite block as needed and check the box that reflects your decision, then run:",
         sections.len(),
         sites.len(),
         sections.len(),
@@ -558,10 +558,10 @@ pub fn write_markdown<W: Write>(
     writeln!(out)?;
     writeln!(out, "    connect-migrate apply recommendations.md")?;
     writeln!(out)?;
-    writeln!(out, "Each section has two decision options. **Exactly one must be checked.** The defaults reflect what the analyzer recommends; edit the Proposed rewrite block, flip the checkbox, or both.")?;
+    writeln!(out, "Each section has two decision options. **Exactly one must be checked.** The defaults reflect what the analyzer recommends; edit the rewrite block, flip the checkbox, or both.")?;
     writeln!(out)?;
-    writeln!(out, "- **apply the rewrite above** — apply uses the contents of the Proposed rewrite block as the new selection.")?;
     writeln!(out, "- **leave the source unchanged** — apply makes no change (accept the v0.4 literal reading).")?;
+    writeln!(out, "- **apply the rewrite below** — apply uses the contents of the rewrite block as the new selection.")?;
     writeln!(out)?;
 
     let total = sections.len();
@@ -606,23 +606,21 @@ pub fn write_markdown<W: Write>(
             writeln!(out, "- {}", site.reasoning)?;
         }
         writeln!(out)?;
-        writeln!(out, "**Proposed rewrite** (edit if needed):")?;
-        writeln!(out)?;
-        writeln!(out, "```graphql")?;
-        write_block_lines(out, &section.proposed_rewrite)?;
-        writeln!(out, "```")?;
-        writeln!(out)?;
         writeln!(out, "**Decide:**")?;
-        writeln!(
-            out,
-            "- [{}] apply the rewrite above",
-            if apply_default { "x" } else { " " }
-        )?;
         writeln!(
             out,
             "- [{}] leave the source unchanged",
             if apply_default { " " } else { "x" }
         )?;
+        writeln!(
+            out,
+            "- [{}] apply the rewrite below",
+            if apply_default { "x" } else { " " }
+        )?;
+        writeln!(out)?;
+        writeln!(out, "```graphql")?;
+        write_block_lines(out, &section.proposed_rewrite)?;
+        writeln!(out, "```")?;
         writeln!(out)?;
     }
     Ok(())
