@@ -70,9 +70,9 @@ enum Command {
         #[arg(default_value = ".")]
         paths: Vec<PathBuf>,
 
-        /// Output path. Use `-` to write to stdout. Defaults to
-        /// `recommendations.md` in the current directory (or stdout
-        /// when `--format=json`).
+        /// Output path. Defaults to stdout, so the typical idiom is
+        /// `connect-migrate analyze . > recommendations.md`. Use `-`
+        /// to be explicit about stdout when scripting.
         #[arg(long, short)]
         output: Option<PathBuf>,
 
@@ -117,15 +117,13 @@ fn run_analyze(
     let project_root = std::env::current_dir()?;
     let sites = analyze::analyze(&paths, &project_root);
 
-    // Decide where to write.
-    let default_path = match format {
-        OutputFormat::Markdown => Some(PathBuf::from("recommendations.md")),
-        OutputFormat::Json => None,
-    };
-    let target = output.or(default_path);
-
+    // Default to stdout; `-o <path>` (or `-o -` for explicit stdout)
+    // overrides. Keeps `connect-migrate analyze . > recommendations.md`
+    // as the obvious idiom and lets scripts pipe to other consumers
+    // without an intermediate file.
     let stdout = io::stdout();
-    let mut sink: Box<dyn std::io::Write> = match target.as_deref() {
+    let writing_to_path = matches!(&output, Some(p) if p.as_os_str() != "-");
+    let mut sink: Box<dyn std::io::Write> = match output.as_deref() {
         Some(p) if p.as_os_str() != "-" => Box::new(BufWriter::new(File::create(p)?)),
         _ => Box::new(BufWriter::new(stdout.lock())),
     };
@@ -155,8 +153,8 @@ fn run_analyze(
     eprintln!(
         "scanned project; {total} site(s) need attention ({kept} keep-v0.3 · {embraced} embrace-v0.4 · {ambiguous} ambiguous)"
     );
-    if let Some(path) = target.as_deref() {
-        if path.as_os_str() != "-" {
+    if writing_to_path {
+        if let Some(path) = output.as_deref() {
             eprintln!("wrote: {}", path.display());
         }
     }
