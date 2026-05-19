@@ -17,6 +17,11 @@
 //! the binary embeds via `include_str!` and prints under the
 //! `agent-guide` subcommand.
 
+pub mod diff;
+
+pub use diff::DiffKind;
+pub use diff::FollowedBy;
+
 /// The embedded developer-facing migration guide. Surfaced to agents
 /// via `connect-migrate agent-guide`.
 pub const AGENT_GUIDE: &str = include_str!("agent_guide.md");

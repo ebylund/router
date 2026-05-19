@@ -23,17 +23,17 @@
 
 use serde::Serialize;
 
-use super::lit_expr::LitExpr;
-use super::location::OffsetRange;
-use super::location::Ranged;
-use super::location::WithRange;
-use super::parser::JSONSelection;
-use super::parser::Key;
-use super::parser::NamedSelection;
-use super::parser::PathList;
-use super::parser::PathSelection;
-use super::parser::SubSelection;
-use super::parser::TopLevelSelection;
+use crate::connectors::json_selection::JSONSelection;
+use crate::connectors::json_selection::Key;
+use crate::connectors::json_selection::LitExpr;
+use crate::connectors::json_selection::NamedSelection;
+use crate::connectors::json_selection::PathList;
+use crate::connectors::json_selection::PathSelection;
+use crate::connectors::json_selection::SubSelection;
+use crate::connectors::json_selection::TopLevelSelection;
+use crate::connectors::json_selection::location::OffsetRange;
+use crate::connectors::json_selection::location::Ranged;
+use crate::connectors::json_selection::location::WithRange;
 
 /// A single structural difference between two [`JSONSelection`] parses
 /// of the same source text under different
