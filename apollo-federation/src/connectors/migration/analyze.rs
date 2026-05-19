@@ -33,7 +33,7 @@ use crate::connectors::migration::FollowedBy;
 /// `DiffKind` found inside a single `@connect` directive's selection.
 /// Cosmetic kinds (`SubSelectionToLitObject`, `LegacyObjectToLitObject`)
 /// are filtered out before emission since they have no behavior change.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Site {
     /// 8-hex stable identifier (`DefaultHasher` truncated). Survives
     /// surrounding line shifts in the source file.
@@ -60,6 +60,11 @@ pub struct Site {
     pub line: Option<usize>,
     /// Approximate column in the source file. Same caveat as `line`.
     pub col: Option<usize>,
+    /// Byte offset range of the divergent token inside `selection`.
+    /// Used by the rewrite-block computation to do precise in-place
+    /// replacements without text-search heuristics. Not emitted in
+    /// markdown output; included in JSON output.
+    pub source_range: Option<(usize, usize)>,
     /// The full normalized selection text (`$$` → `$` applied),
     /// included for context display and apply-time lookup.
     pub selection: String,
@@ -236,6 +241,7 @@ fn handle_connect(
         let kind_name = diff_kind_name(&kind);
         let text = diff_kind_text(&kind).to_string();
         let followed_by = diff_kind_followed_by(&kind);
+        let source_range = diff_kind_source_range(&kind);
         let (rec, reason) = classify(&kind);
         let id = hash_id(file, &coordinate, kind_name, &text, &normalized);
         out.push(Site {
@@ -249,8 +255,21 @@ fn handle_connect(
             reasoning: reason,
             line: Some(line_no),
             col: Some(col_no),
+            source_range,
             selection: normalized.clone(),
         });
+    }
+}
+
+fn diff_kind_source_range(kind: &DiffKind) -> Option<(usize, usize)> {
+    match kind {
+        DiffKind::KeyFlippedToLiteralNull { source_range, .. } => *source_range,
+        DiffKind::KeyFlippedToLiteralBool { source_range, .. } => *source_range,
+        DiffKind::KeyFieldFlippedToLiteralString { source_range, .. } => *source_range,
+        DiffKind::KeyQuotedFlippedToLiteralString { source_range, .. } => *source_range,
+        DiffKind::SubSelectionToLitObject { source_range } => *source_range,
+        DiffKind::LegacyObjectToLitObject { source_range } => *source_range,
+        DiffKind::Other { source_range, .. } => *source_range,
     }
 }
 
@@ -420,6 +439,83 @@ fn hash_id(file: &str, coordinate: &str, kind: &str, text: &str, selection: &str
     format!("{:08x}", (h as u32))
 }
 
+/// A `Section` represents one `@connect(selection: …)` directive that
+/// contains at least one divergent token. Multiple sites within the
+/// same selection (e.g., several tokens in a multi-field selection)
+/// roll up into a single Section so the developer makes one decision
+/// covering the entire selection's rewrite.
+#[derive(Debug)]
+struct Section<'a> {
+    file: &'a str,
+    coordinate: &'a str,
+    selection: &'a str,
+    sites: Vec<&'a Site>,
+    /// The selection text with `$.` fortifications applied to every
+    /// site that the heuristic flagged as `keep-v0.3`. Equal to
+    /// `selection` if no site got a keep-v0.3 recommendation.
+    proposed_rewrite: String,
+}
+
+fn group_into_sections<'a>(sites: &'a [Site]) -> Vec<Section<'a>> {
+    // Group by (file, coordinate, selection) — these all share one
+    // `@connect(...)` directive. Order: file-walk order from analyze.
+    let mut sections: Vec<Section<'a>> = Vec::new();
+    for site in sites {
+        let last = sections.last_mut();
+        let same = last
+            .as_ref()
+            .map(|s| s.file == site.file && s.coordinate == site.coordinate && s.selection == site.selection)
+            .unwrap_or(false);
+        if let Some(s) = last.filter(|_| same) {
+            s.sites.push(site);
+        } else {
+            sections.push(Section {
+                file: &site.file,
+                coordinate: &site.coordinate,
+                selection: &site.selection,
+                sites: vec![site],
+                proposed_rewrite: String::new(),
+            });
+        }
+    }
+    for section in &mut sections {
+        section.proposed_rewrite = compute_proposed_rewrite(section);
+    }
+    sections
+}
+
+/// Build the rewrite preview by applying `$.` fortifications to every
+/// `keep-v0.3`-recommended token in the section. Token positions come
+/// from each site's `source_range` (byte offsets into `selection`).
+fn compute_proposed_rewrite(section: &Section<'_>) -> String {
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for site in &section.sites {
+        if !matches!(site.recommendation, Recommendation::KeepV03) {
+            continue;
+        }
+        let Some((start, end)) = site.source_range else { continue };
+        let new_text = match site.kind.as_str() {
+            "key_flipped_to_literal_null" => "$.null".to_string(),
+            "key_flipped_to_literal_bool" => format!("$.{}", site.text),
+            "key_field_flipped_to_literal_string" => format!("$.{}", site.text),
+            "key_quoted_flipped_to_literal_string" => format!("$.\"{}\"", site.text),
+            _ => continue,
+        };
+        edits.push((start, end, new_text));
+    }
+    if edits.is_empty() {
+        return section.selection.to_string();
+    }
+    edits.sort_by_key(|(s, _, _)| *s);
+    let mut out = section.selection.to_string();
+    for (start, end, new_text) in edits.into_iter().rev() {
+        if end <= out.len() && out.is_char_boundary(start) && out.is_char_boundary(end) {
+            out.replace_range(start..end, &new_text);
+        }
+    }
+    out
+}
+
 /// Emit `recommendations.md` per the SKILL.md v1 format.
 pub fn write_markdown<W: Write>(
     out: &mut W,
@@ -449,80 +545,94 @@ pub fn write_markdown<W: Write>(
         )?;
         return Ok(());
     }
+
+    let sections = group_into_sections(sites);
+
     writeln!(
         out,
-        "{} site(s) need a decision. Edit the `**Decision:**` line on each, then run:",
-        sites.len()
+        "{} section(s) need a decision ({} divergent token(s) across {} `@connect` selection(s)). For each section, edit the **Proposed rewrite** block as needed and check the box that reflects your decision, then run:",
+        sections.len(),
+        sites.len(),
+        sections.len(),
     )?;
     writeln!(out)?;
     writeln!(out, "    connect-migrate apply recommendations.md")?;
     writeln!(out)?;
-    writeln!(out, "**Decision values:**")?;
+    writeln!(out, "Each section has two decision options. **Exactly one must be checked.** The defaults reflect what the analyzer recommends; edit the Proposed rewrite block, flip the checkbox, or both.")?;
     writeln!(out)?;
-    writeln!(out, "- `keep-v0.3` — preserve the v0.3 field-reference reading by prepending `$.` to the token.")?;
-    writeln!(out, "- `embrace-v0.4` — accept the new v0.4 literal reading; no source change.")?;
-    writeln!(out, "- `skip` — make no change; do not raise this site again on future analyze runs.")?;
-    writeln!(out, "- `custom: <text>` — replace the token with the given text exactly.")?;
+    writeln!(out, "- **apply the rewrite above** — apply uses the contents of the Proposed rewrite block as the new selection.")?;
+    writeln!(out, "- **leave the source unchanged** — apply makes no change (accept the v0.4 literal reading).")?;
     writeln!(out)?;
 
-    for (idx, site) in sites.iter().enumerate() {
+    let total = sections.len();
+    for (idx, section) in sections.iter().enumerate() {
         let n = idx + 1;
-        let total = sites.len();
+        let apply_default = section.proposed_rewrite != section.selection;
         writeln!(out, "---")?;
-        writeln!(out)?;
-        writeln!(out, "## site {n} of {total} — `{}`", site.file)?;
-        writeln!(out)?;
-        writeln!(out, "<!-- connect-migrate site v1")?;
-        writeln!(out, "  id: {}", site.id)?;
-        writeln!(out, "  file: {}", site.file)?;
-        if let Some(line) = site.line {
-            writeln!(out, "  line: {line}")?;
-        }
-        if let Some(col) = site.col {
-            writeln!(out, "  col: {col}")?;
-        }
-        writeln!(out, "  coordinate: {}", site.coordinate)?;
-        writeln!(out, "  kind: {}", site.kind)?;
-        if !site.text.is_empty() {
-            writeln!(out, "  text: {}", quote_for_comment(&site.text))?;
-        }
-        writeln!(out, "  followed_by: {}", followed_by_name(site.followed_by))?;
-        writeln!(out, "-->")?;
         writeln!(out)?;
         writeln!(
             out,
-            "In `{}`, `{}` will reparse differently under `connect/v0.4`.",
-            site.coordinate,
-            display_token(&site.text, &site.kind),
+            "## section {n} of {total} — `{}` (`{}`)",
+            section.file, section.coordinate,
         )?;
         writeln!(out)?;
+        for site in &section.sites {
+            writeln!(out, "<!-- connect-migrate site v1")?;
+            writeln!(out, "  id: {}", site.id)?;
+            writeln!(out, "  file: {}", site.file)?;
+            if let Some(line) = site.line {
+                writeln!(out, "  line: {line}")?;
+            }
+            if let Some(col) = site.col {
+                writeln!(out, "  col: {col}")?;
+            }
+            writeln!(out, "  coordinate: {}", site.coordinate)?;
+            writeln!(out, "  kind: {}", site.kind)?;
+            if !site.text.is_empty() {
+                writeln!(out, "  text: {}", quote_for_comment(&site.text))?;
+            }
+            writeln!(out, "  followed_by: {}", followed_by_name(site.followed_by))?;
+            writeln!(out, "  recommendation: {}", site.recommendation.as_str())?;
+            writeln!(out, "-->")?;
+        }
+        writeln!(out)?;
+        writeln!(out, "**Original selection:**")?;
+        writeln!(out)?;
         writeln!(out, "```graphql")?;
-        write_selection_excerpt(out, &site.selection)?;
+        write_block_lines(out, section.selection)?;
         writeln!(out, "```")?;
         writeln!(out)?;
-        writeln!(out, "{}", site.reasoning)?;
+        for site in &section.sites {
+            writeln!(out, "- {}", site.reasoning)?;
+        }
         writeln!(out)?;
-        writeln!(out, "**Decision:** `{}`", site.recommendation.as_str())?;
+        writeln!(out, "**Proposed rewrite** (edit if needed):")?;
+        writeln!(out)?;
+        writeln!(out, "```graphql")?;
+        write_block_lines(out, &section.proposed_rewrite)?;
+        writeln!(out, "```")?;
+        writeln!(out)?;
+        writeln!(out, "**Decide:**")?;
+        writeln!(
+            out,
+            "- [{}] apply the rewrite above",
+            if apply_default { "x" } else { " " }
+        )?;
+        writeln!(
+            out,
+            "- [{}] leave the source unchanged",
+            if apply_default { " " } else { "x" }
+        )?;
         writeln!(out)?;
     }
     Ok(())
 }
 
-fn write_selection_excerpt<W: Write>(out: &mut W, selection: &str) -> std::io::Result<()> {
-    // For now: print the whole selection verbatim, indented to match
-    // the surrounding fence. Future versions may truncate around the
-    // site's source_range for very long selections.
-    for line in selection.lines() {
+fn write_block_lines<W: Write>(out: &mut W, body: &str) -> std::io::Result<()> {
+    for line in body.lines() {
         writeln!(out, "{line}")?;
     }
     Ok(())
-}
-
-fn display_token(text: &str, kind: &str) -> String {
-    match kind {
-        "key_quoted_flipped_to_literal_string" => format!("\"{text}\""),
-        _ => text.to_string(),
-    }
 }
 
 fn followed_by_name(f: FollowedBy) -> &'static str {
