@@ -100,18 +100,77 @@ impl Recommendation {
 /// breaking site found. The order is stable across runs for the same
 /// inputs (sites are emitted in file-walk order, then in diff-walk
 /// order within each `@connect` directive).
-pub fn analyze(paths: &[PathBuf], project_root: &Path) -> Vec<Site> {
-    let mut out = Vec::new();
+pub fn analyze(paths: &[PathBuf], project_root: &Path) -> AnalyzeReport {
+    let mut report = AnalyzeReport::default();
     for p in paths {
-        walk(p, project_root, &mut out);
+        walk(p, project_root, &mut report);
     }
-    out
+    report
 }
 
-fn walk(path: &Path, project_root: &Path, out: &mut Vec<Site>) {
+/// Summary of an analyze pass. Lets callers distinguish "the analyzer
+/// did its job and found nothing actionable" from "the analyzer had
+/// nothing to look at" — both produce an empty `sites` vector, but
+/// only the former is a trustworthy "safe to upgrade" verdict.
+#[derive(Default)]
+pub struct AnalyzeReport {
+    /// Divergent sites that warrant a developer decision.
+    pub sites: Vec<Site>,
+    /// `.graphql` files actually visited during the walk.
+    pub files_scanned: usize,
+    /// `@connect` directives whose `selection` argument parsed cleanly
+    /// under both `connect/v0.3` and `connect/v0.4`. The denominator
+    /// for "every selection in your schema parses identically."
+    pub directives_analyzed: usize,
+}
+
+/// Machine-readable result kind for the recommendations file. Surfaced
+/// as an HTML comment in the markdown so agents can switch on the
+/// outcome without parsing prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultKind {
+    /// Walk visited zero `.graphql` files — likely a bad path arg.
+    EmptyScan,
+    /// Files were scanned but contained no `@connect` directives.
+    NothingToMigrate,
+    /// Analyzable `@connect` directives are present and every one of
+    /// their selections parses identically under v0.3 and v0.4. The
+    /// developer can flip the `@link` to `connect/v0.4` without any
+    /// source edits.
+    SafeToUpgrade,
+    /// At least one divergent selection needs a developer decision.
+    NeedsDecisions,
+}
+
+impl ResultKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResultKind::EmptyScan => "empty-scan",
+            ResultKind::NothingToMigrate => "nothing-to-migrate",
+            ResultKind::SafeToUpgrade => "safe-to-upgrade",
+            ResultKind::NeedsDecisions => "needs-decisions",
+        }
+    }
+}
+
+impl AnalyzeReport {
+    pub fn result_kind(&self) -> ResultKind {
+        if self.files_scanned == 0 {
+            ResultKind::EmptyScan
+        } else if self.directives_analyzed == 0 {
+            ResultKind::NothingToMigrate
+        } else if self.sites.is_empty() {
+            ResultKind::SafeToUpgrade
+        } else {
+            ResultKind::NeedsDecisions
+        }
+    }
+}
+
+fn walk(path: &Path, project_root: &Path, report: &mut AnalyzeReport) {
     if path.is_file() {
         if path.extension().and_then(|e| e.to_str()) == Some("graphql") {
-            scan_file(path, project_root, out);
+            scan_file(path, project_root, report);
         }
         return;
     }
@@ -120,13 +179,14 @@ fn walk(path: &Path, project_root: &Path, out: &mut Vec<Site>) {
         let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         paths.sort();
         for child in paths {
-            walk(&child, project_root, out);
+            walk(&child, project_root, report);
         }
     }
 }
 
-fn scan_file(path: &Path, project_root: &Path, out: &mut Vec<Site>) {
+fn scan_file(path: &Path, project_root: &Path, report: &mut AnalyzeReport) {
     let Ok(sdl) = fs::read_to_string(path) else { return };
+    report.files_scanned += 1;
     let line_index = LineIndex::new(&sdl);
     let rel = path
         .strip_prefix(project_root)
@@ -142,37 +202,37 @@ fn scan_file(path: &Path, project_root: &Path, out: &mut Vec<Site>) {
             cst::Definition::ObjectTypeDefinition(otd) => {
                 let type_name = otd.name().map(|n| n.text().to_string()).unwrap_or_default();
                 if let Some(directives) = otd.directives() {
-                    scan_directives(&type_name, directives, &rel, &line_index, out);
+                    scan_directives(&type_name, directives, &rel, &line_index, report);
                 }
                 if let Some(fields) = otd.fields_definition() {
-                    scan_fields(&type_name, fields, &rel, &line_index, out);
+                    scan_fields(&type_name, fields, &rel, &line_index, report);
                 }
             }
             cst::Definition::ObjectTypeExtension(ote) => {
                 let type_name = ote.name().map(|n| n.text().to_string()).unwrap_or_default();
                 if let Some(directives) = ote.directives() {
-                    scan_directives(&type_name, directives, &rel, &line_index, out);
+                    scan_directives(&type_name, directives, &rel, &line_index, report);
                 }
                 if let Some(fields) = ote.fields_definition() {
-                    scan_fields(&type_name, fields, &rel, &line_index, out);
+                    scan_fields(&type_name, fields, &rel, &line_index, report);
                 }
             }
             cst::Definition::InterfaceTypeDefinition(itd) => {
                 let type_name = itd.name().map(|n| n.text().to_string()).unwrap_or_default();
                 if let Some(directives) = itd.directives() {
-                    scan_directives(&type_name, directives, &rel, &line_index, out);
+                    scan_directives(&type_name, directives, &rel, &line_index, report);
                 }
                 if let Some(fields) = itd.fields_definition() {
-                    scan_fields(&type_name, fields, &rel, &line_index, out);
+                    scan_fields(&type_name, fields, &rel, &line_index, report);
                 }
             }
             cst::Definition::InterfaceTypeExtension(ite) => {
                 let type_name = ite.name().map(|n| n.text().to_string()).unwrap_or_default();
                 if let Some(directives) = ite.directives() {
-                    scan_directives(&type_name, directives, &rel, &line_index, out);
+                    scan_directives(&type_name, directives, &rel, &line_index, report);
                 }
                 if let Some(fields) = ite.fields_definition() {
-                    scan_fields(&type_name, fields, &rel, &line_index, out);
+                    scan_fields(&type_name, fields, &rel, &line_index, report);
                 }
             }
             _ => {}
@@ -185,11 +245,11 @@ fn scan_directives(
     directives: cst::Directives,
     file: &str,
     line_index: &LineIndex,
-    out: &mut Vec<Site>,
+    report: &mut AnalyzeReport,
 ) {
     for d in directives.directives() {
         if d.name().map(|n| n.text().to_string()).as_deref() == Some("connect") {
-            handle_connect(&d, type_name.to_string(), file, line_index, out);
+            handle_connect(&d, type_name.to_string(), file, line_index, report);
         }
     }
 }
@@ -199,7 +259,7 @@ fn scan_fields(
     fields: cst::FieldsDefinition,
     file: &str,
     line_index: &LineIndex,
-    out: &mut Vec<Site>,
+    report: &mut AnalyzeReport,
 ) {
     for field in fields.field_definitions() {
         let field_name = field.name().map(|n| n.text().to_string()).unwrap_or_default();
@@ -207,7 +267,7 @@ fn scan_fields(
         let Some(directives) = field.directives() else { continue };
         for d in directives.directives() {
             if d.name().map(|n| n.text().to_string()).as_deref() == Some("connect") {
-                handle_connect(&d, coordinate.clone(), file, line_index, out);
+                handle_connect(&d, coordinate.clone(), file, line_index, report);
             }
         }
     }
@@ -218,7 +278,7 @@ fn handle_connect(
     coordinate: String,
     file: &str,
     line_index: &LineIndex,
-    out: &mut Vec<Site>,
+    report: &mut AnalyzeReport,
 ) {
     let Some(args) = d.arguments() else { return };
     let Some(selection_text) = extract_selection(args) else { return };
@@ -228,6 +288,10 @@ fn handle_connect(
     let normalized = selection_text.replace("$$", "$");
     let Ok(v3) = JSONSelection::parse_with_spec(&normalized, ConnectSpec::V0_3) else { return };
     let Ok(v4) = JSONSelection::parse_with_spec(&normalized, ConnectSpec::V0_4) else { return };
+    // Both parses succeeded — the directive contributes to the
+    // "safe to upgrade" denominator regardless of whether the two
+    // ASTs end up structurally equal.
+    report.directives_analyzed += 1;
     if v3.structural_eq(&v4) {
         return;
     }
@@ -251,7 +315,7 @@ fn handle_connect(
         let source_range = diff_kind_source_range(&kind);
         let (rec, reason) = classify(&kind);
         let id = hash_id(file, &coordinate, kind_name, &text, &normalized);
-        out.push(Site {
+        report.sites.push(Site {
             id,
             file: file.to_string(),
             coordinate: coordinate.clone(),
@@ -527,15 +591,17 @@ fn compute_proposed_rewrite(section: &Section<'_>) -> String {
 /// Emit `recommendations.md` per the SKILL.md v1 format.
 pub fn write_markdown<W: Write>(
     out: &mut W,
-    sites: &[Site],
+    report: &AnalyzeReport,
     project_root: &Path,
     generator_version: &str,
 ) -> std::io::Result<()> {
     let generated_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "unknown".to_string());
+    let kind = report.result_kind();
 
     writeln!(out, "<!-- connect-migrate recommendations v1 -->")?;
+    writeln!(out, "<!-- result: {} -->", kind.as_str())?;
     writeln!(out, "<!-- generator: connect-migrate {generator_version} -->")?;
     writeln!(out, "<!-- generated-at: {generated_at} -->")?;
     writeln!(
@@ -543,24 +609,81 @@ pub fn write_markdown<W: Write>(
         "<!-- project-root: {} -->",
         project_root.display()
     )?;
+    writeln!(out, "<!-- files-scanned: {} -->", report.files_scanned)?;
+    writeln!(
+        out,
+        "<!-- directives-analyzed: {} -->",
+        report.directives_analyzed
+    )?;
+    writeln!(out, "<!-- divergent-sites: {} -->", report.sites.len())?;
     writeln!(out)?;
-    writeln!(out, "# `connect/v0.3` → `connect/v0.4` migration recommendations")?;
-    writeln!(out)?;
-    if sites.is_empty() {
-        writeln!(
-            out,
-            "No sites in this project need migration — every `@connect(selection: …)` parses identically under v0.3 and v0.4."
-        )?;
-        return Ok(());
+
+    match kind {
+        ResultKind::EmptyScan => {
+            writeln!(out, "# connect-migrate report — no schema files found")?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "Scanned 0 `.graphql` file(s). The path you passed contains no GraphQL schemas the analyzer could see. Confirm the directory or file argument and re-run."
+            )?;
+            return Ok(());
+        }
+        ResultKind::NothingToMigrate => {
+            writeln!(
+                out,
+                "# connect-migrate report — no `@connect` directives present"
+            )?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "Scanned {file_word} and found no `@connect` directives. There is nothing for this tool to migrate. If your connector schemas live elsewhere, re-run against that path; otherwise the project does not use Apollo Connectors and the `connect/v0.4` upgrade does not apply.",
+                file_word = file_count_phrase(report.files_scanned),
+            )?;
+            return Ok(());
+        }
+        ResultKind::SafeToUpgrade => {
+            writeln!(out, "# connect-migrate report — safe to upgrade")?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "Scanned {file_word}; found {directive_word}; detected zero divergent selection(s).",
+                file_word = file_count_phrase(report.files_scanned),
+                directive_word = directive_count_phrase(report.directives_analyzed),
+            )?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "Every `@connect(selection: …)` in your schema parses identically under `connect/v0.3` and `connect/v0.4`. This is a trustworthy verdict from the analyzer, not the absence of one: the upgrade is safe with no source changes."
+            )?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "Update your schema's `@link` to `connect/v0.4` whenever you're ready:"
+            )?;
+            writeln!(out)?;
+            writeln!(out, "```graphql")?;
+            writeln!(
+                out,
+                "extend schema"
+            )?;
+            writeln!(
+                out,
+                "  @link(url: \"https://specs.apollo.dev/connect/v0.4\", import: [\"@connect\", \"@source\"])"
+            )?;
+            writeln!(out, "```")?;
+            return Ok(());
+        }
+        ResultKind::NeedsDecisions => {}
     }
 
-    let sections = group_into_sections(sites);
-
+    let sections = group_into_sections(&report.sites);
+    writeln!(out, "# `connect/v0.3` → `connect/v0.4` migration recommendations")?;
+    writeln!(out)?;
     writeln!(
         out,
         "{} section(s) need a decision ({} divergent token(s) across {} `@connect` selection(s)). For each section, edit the rewrite block as needed and check the box that reflects your decision. Then hand the edited file back to your migration assistant (`connect-migrate agent-guide` prints the prose it should follow).",
         sections.len(),
-        sites.len(),
+        report.sites.len(),
         sections.len(),
     )?;
     writeln!(out)?;
@@ -633,6 +756,20 @@ pub fn write_markdown<W: Write>(
         writeln!(out)?;
     }
     Ok(())
+}
+
+fn file_count_phrase(n: usize) -> String {
+    match n {
+        1 => "1 `.graphql` file".to_string(),
+        _ => format!("{n} `.graphql` files"),
+    }
+}
+
+fn directive_count_phrase(n: usize) -> String {
+    match n {
+        1 => "1 `@connect` directive".to_string(),
+        _ => format!("{n} `@connect` directives"),
+    }
 }
 
 fn write_block_lines<W: Write>(out: &mut W, body: &str) -> std::io::Result<()> {

@@ -122,7 +122,7 @@ fn run_analyze(
         [only] if only.is_dir() => only.clone(),
         _ => std::env::current_dir()?,
     };
-    let sites = analyze::analyze(&paths, &project_root);
+    let report = analyze::analyze(&paths, &project_root);
 
     // Default to stdout; `-o <path>` (or `-o -` for explicit stdout)
     // overrides. Keeps `connect-migrate analyze . > recommendations.md`
@@ -137,28 +137,34 @@ fn run_analyze(
 
     match format {
         OutputFormat::Markdown => {
-            analyze::write_markdown(&mut sink, &sites, &project_root, VERSION)?;
+            analyze::write_markdown(&mut sink, &report, &project_root, VERSION)?;
         }
         OutputFormat::Json => {
-            analyze::write_jsonl(&mut sink, &sites)?;
+            analyze::write_jsonl(&mut sink, &report.sites)?;
         }
     }
 
-    let total = sites.len();
-    let kept = sites
+    let total = report.sites.len();
+    let kept = report
+        .sites
         .iter()
         .filter(|s| matches!(s.recommendation, analyze::Recommendation::KeepV03))
         .count();
-    let embraced = sites
+    let embraced = report
+        .sites
         .iter()
         .filter(|s| matches!(s.recommendation, analyze::Recommendation::EmbraceV04))
         .count();
-    let ambiguous = sites
+    let ambiguous = report
+        .sites
         .iter()
         .filter(|s| matches!(s.recommendation, analyze::Recommendation::Ambiguous))
         .count();
     eprintln!(
-        "scanned project; {total} site(s) need attention ({kept} keep-v0.3 · {embraced} embrace-v0.4 · {ambiguous} ambiguous)"
+        "scanned {files} file(s); analyzed {analyzed} `@connect` directive(s); {total} site(s) need attention ({kept} keep-v0.3 · {embraced} embrace-v0.4 · {ambiguous} ambiguous) — {kind}",
+        files = report.files_scanned,
+        analyzed = report.directives_analyzed,
+        kind = report.result_kind().as_str(),
     );
     if writing_to_path {
         if let Some(path) = output.as_deref() {
